@@ -32,7 +32,9 @@ Not that each call to get_gh_metadata() results in 2 API requests (on for the re
 
 import sys
 import logging
+import requests
 import re
+import json
 import os
 import time
 from datetime import datetime
@@ -49,6 +51,12 @@ class DummyGhMetadata(dict):
     def __init__(self):
         self.stargazers_count = 0
         self.archived = False
+        self.current_release = {
+            "tag": None,
+            "published_at": None
+        }
+        self.last_commit_date = None
+        self.commit_history = {}
 
 def get_gh_metadata(step, github_url, g, errors):
     """get github project metadata from Github API"""
@@ -114,3 +122,147 @@ def add_github_metadata(step):
         logging.error("There were errors during processing")
         print('\n'.join(errors))
         sys.exit(1)
+
+def add_gh_metadata(step):
+    """gather github project data and add it to source YAML files"""
+    GITHUB_TOKEN = os.environ['GITHUB_TOKEN']
+    errors = []
+    github_projects = []
+    # Load software data
+    software_list = load_yaml_data(step['module_options']['source_directory'] + '/software')
+    logging.info('updating software data from Github API')
+    # Check if the source code URL is a GitHub repository and add it to the queue to be processed
+    for software in software_list:
+        if 'source_code_url' in software:
+            if re.search(r'^https://github.com/[\w\.\-]+/[\w\.\-]+/?$', software['source_code_url']):
+                # Check if we only want to update missing metadata or all metadata
+                if 'gh_metadata_only_missing' in step['module_options'].keys() and step['module_options']['gh_metadata_only_missing']:
+                    if ('stargazers_count' not in software) or ('updated_at' not in software) or ('archived' not in software) or ('current_release' not in software) or ('last_commit_date' not in software) or ('commit_history' not in software):
+                        github_projects.append(software)
+                    else:
+                        logging.debug('all metadata already present, skipping %s', software['source_code_url'])
+                # If key is not present, update all metadata
+                else:
+                    github_projects.append(software)
+        # TODO: Why do we need to check the website_url? We can exspect that the source_code_url is always present and the website_url is optional and even if changed it would not point to a github repository
+        elif 'website_url' in software:
+            if re.search(r'^https://github.com/[\w\.\-]+/[\w\.\-]+/?$' , software['website_url']):
+                # Check if we only want to update missing metadata or all metadata
+                if 'gh_metadata_only_missing' in step['module_options'].keys() and step['module_options']['gh_metadata_only_missing']:
+                    if ('stargazers_count' not in software) or ('updated_at' not in software) or ('archived' not in software) or ('current_release' not in software) or ('last_commit_date' not in software) or ('commit_history' not in software):
+                        github_projects.append(software)
+                    else:
+                        logging.debug('all metadata already present, skipping %s', software['website_url'])
+                # If key is not present, update all metadata
+                else:
+                    github_projects.append(software)
+    # Get the metadata for the GitHub repositories
+    GITHUB_GRAPHQL_API = "https://api.github.com/graphql"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+
+    # Get the URLs of the queued repositories
+    github_urls = [software['source_code_url'] for software in github_projects]
+    repos = [re.sub('https://github.com/', '', url) for url in github_urls]
+    projectindex = 0
+
+    # Split the list of repositories into batches of 100
+    n = 100
+    batches = [repos[i * n:(i + 1) * n] for i in range((len(repos) + n - 1) // n )]
+
+
+    for batch in batches:
+        repos_query = " ".join([f"repo:{repo}" for repo in batch])
+
+        # Get the current year and month
+        now = datetime.now()
+        year_month = now.strftime("%Y-%m")
+
+        query = f"""
+        {{
+          search(
+            type: REPOSITORY
+            query: "{repos_query}"
+            first: 100
+          ) {{
+            repos: edges {{
+              repo: node {{
+                ... on Repository {{
+                  name
+                  stargazerCount
+                  archived
+                  releases(last: 1) {{
+                    edges {{
+                      node {{
+                        tagName
+                        publishedAt
+                      }}
+                    }}
+                  }}
+                  defaultBranchRef {{
+                    target {{
+                      ... on Commit {{
+                        committedDate
+                        history(since: "{year_month}-01T00:00:00", until: "{year_month}-31T23:59:59") {{
+                          totalCount
+                        }}
+                      }}
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+        try:
+            response = requests.post(GITHUB_GRAPHQL_API, json={"query": query}, headers=headers)
+            data = response.json()
+        except Exception as e:
+            errors.append(str(e))
+
+        for edge in data["data"]["search"]["repos"]:
+            repo = edge["repo"]
+            software = github_projects[projectindex]
+            software["stargazer_count"] = repo["stargazerCount"]
+            software["archived"] = repo["archived"]
+            if repo["releases"]["edges"]:
+                software["current_release"] = {
+                    "tag": repo["releases"]["edges"][0]["node"]["tagName"],
+                    "published_at": repo["releases"]["edges"][0]["node"]["publishedAt"]
+                }
+            else:
+                software["current_release"] = {
+                    "tag": None,
+                    "published_at": None
+                }
+            software["last_commit_date"] = repo["defaultBranchRef"]["target"]["committedDate"]
+            if year_month in software["commit_history"]:
+                software["commit_history"][year_month] = repo["defaultBranchRef"]["target"]["history"]["totalCount"]
+            else:
+                software["commit_history"].update({
+                    year_month: repo["defaultBranchRef"]["target"]["history"]["totalCount"]
+                })
+            projectindex += 1
+            write_software_yaml(step, software)
+    
+    if errors:
+        logging.error("There were errors during processing")
+        print('\n'.join(errors))
+        sys.exit(1)
+
+def gh_metadata_cleanup(step):
+    """remove github metadata from source YAML files"""
+    software_list = load_yaml_data(step['module_options']['source_directory'] + '/software')
+    logging.info('cleaning up old github metadata from software data')
+    # Get the current year and month
+    now = datetime.now()
+    year_month = now.strftime("%Y-%m")
+    # Check if commit_history exists and remove any entries that are older the 12 months
+    for software in software_list:
+        if 'commit_history' in software:
+            for key in list(software['commit_history'].keys()):
+                if key < year_month:
+                    del software['commit_history'][key]
+                    logging.debug('removing commit history %s for %s', key, software['name'])
+        write_software_yaml(step, software)
+    
