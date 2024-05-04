@@ -135,7 +135,7 @@ def add_github_metadata(step):
                   name
                   stargazerCount
                   isArchived
-                  releases(last: 1) {{
+                  releases(first: 1) {{
                     edges {{
                       node {{
                         tagName
@@ -174,15 +174,10 @@ def add_github_metadata(step):
             software = github_projects[projectindex]
             software["stargazers_count"] = repo["stargazerCount"]
             software["archived"] = repo["isArchived"]
-            if repo["releases"]["edges"]:
+            if repo["releases"]["edges"] and len(repo["releases"]["edges"]) > 0:
                 software["current_release"] = {
                     "tag": repo["releases"]["edges"][0]["node"]["tagName"],
                     "published_at": datetime.strptime(repo["releases"]["edges"][0]["node"]["publishedAt"], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d')
-                }
-            else:
-                software["current_release"] = {
-                    "tag": None,
-                    "published_at": None
                 }
             software["updated_at"] = datetime.strptime(repo["defaultBranchRef"]["target"]["committedDate"], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d')
             if 'commit_history' not in software:
