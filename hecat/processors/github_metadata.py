@@ -195,6 +195,10 @@ def add_github_metadata(step):
                 })
             projectindex += 1
             write_software_yaml(step, software)
+
+        # Sleep for the specified amount of time before the next request
+        if 'sleep_time' in step['module_options']:
+            time.sleep(step['module_options']['sleep_time'])
     
     if errors:
         logging.error("There were errors during processing")
@@ -207,12 +211,12 @@ def gh_metadata_cleanup(step):
     logging.info('cleaning up old github metadata from software data')
     # Get the current year and month
     now = datetime.now()
-    year_month = now.strftime("%Y-%m")
+    year_month_12_months_ago = (now.replace(year = now.year - 1)).strftime("%Y-%m")
     # Check if commit_history exists and remove any entries that are older the 12 months
     for software in software_list:
         if 'commit_history' in software:
             for key in list(software['commit_history'].keys()):
-                if key < year_month:
+                if key < year_month_12_months_ago:
                     del software['commit_history'][key]
                     logging.debug('removing commit history %s for %s', key, software['name'])
         write_software_yaml(step, software)
