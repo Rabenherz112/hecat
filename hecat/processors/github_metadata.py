@@ -58,23 +58,6 @@ class DummyGhMetadata(dict):
         self.last_commit_date = None
         self.commit_history = {}
 
-def get_gh_metadata(step, github_url, g, errors):
-    """get github project metadata from Github API"""
-    if 'sleep_time' in step['module_options']:
-        time.sleep(step['module_options']['sleep_time'])
-    project = re.sub('https://github.com/', '', github_url)
-    project = re.sub('/$', '', project)
-    try:
-        gh_metadata = g.get_repo(project)
-        latest_commit_date = gh_metadata.get_commits()[0].commit.committer.date
-    except github.GithubException as github_error:
-        error_msg = '{} : {}'.format(github_url, github_error)
-        logging.error(error_msg)
-        errors.append(error_msg)
-        gh_metadata = DummyGhMetadata()
-        latest_commit_date = datetime.strptime('1970-01-01', '%Y-%m-%d')
-    return gh_metadata, latest_commit_date
-
 def write_software_yaml(step, software):
     """write software data to yaml file"""
     dest_file = '{}/{}'.format(
@@ -85,45 +68,6 @@ def write_software_yaml(step, software):
         yaml.dump(software, yaml_file)
 
 def add_github_metadata(step):
-    """gather github project data and add it to source YAML files"""
-    GITHUB_TOKEN = os.environ['GITHUB_TOKEN']
-    g = github.Github(GITHUB_TOKEN)
-    errors = []
-    software_list = load_yaml_data(step['module_options']['source_directory'] + '/software')
-    logging.info('updating software data from Github API')
-    for software in software_list:
-        github_url = ''
-        if 'source_code_url' in software:
-            if re.search(r'^https://github.com/[\w\.\-]+/[\w\.\-]+/?$', software['source_code_url']):
-                github_url = software['source_code_url']
-        elif 'website_url' in software:
-            if re.search(r'^https://github.com/[\w\.\-]+/[\w\.\-]+/?$', software['website_url']):
-                github_url = software['website_url']
-        if github_url:
-            logging.debug('%s is a github project URL', github_url)
-            if 'gh_metadata_only_missing' in step['module_options'].keys() and step['module_options']['gh_metadata_only_missing']:
-                if ('stargazers_count' not in software) or ('updated_at' not in software) or ('archived' not in software):
-                    logging.info('Missing metadata for %s, gathering it from Github API', software['name'])
-                    gh_metadata, latest_commit_date = get_gh_metadata(step, github_url, g, errors)
-                    software['stargazers_count'] = int(gh_metadata.stargazers_count)
-                    software['updated_at'] = datetime.strftime(latest_commit_date, "%Y-%m-%d")
-                    software['archived'] = bool(gh_metadata.archived)
-                    write_software_yaml(step, software)
-                else:
-                    logging.debug('all metadata already present, skipping %s', github_url)
-            else:
-                logging.info('Gathering metadata for %s from Github API', github_url)
-                gh_metadata, latest_commit_date = get_gh_metadata(step, github_url, g, errors)
-                software['stargazers_count'] = gh_metadata.stargazers_count
-                software['updated_at'] = datetime.strftime(latest_commit_date, "%Y-%m-%d")
-                software['archived'] = gh_metadata.archived
-                write_software_yaml(step, software)
-    if errors:
-        logging.error("There were errors during processing")
-        print('\n'.join(errors))
-        sys.exit(1)
-
-def add_gh_metadata(step):
     """gather github project data and add it to source YAML files"""
     GITHUB_TOKEN = os.environ['GITHUB_TOKEN']
     errors = []
@@ -165,8 +109,9 @@ def add_gh_metadata(step):
     repos = [re.sub('https://github.com/', '', url) for url in github_urls]
     projectindex = 0
 
-    # Split the list of repositories into batches of 100
-    n = 100
+    # Split the list of repositories into batches of 60
+    # TODO: While more should be supported, I don't get it to work with 75 or more, as the API returns an error
+    n = 60
     batches = [repos[i * n:(i + 1) * n] for i in range((len(repos) + n - 1) // n )]
 
 
@@ -182,14 +127,14 @@ def add_gh_metadata(step):
           search(
             type: REPOSITORY
             query: "{repos_query}"
-            first: 100
+            first: 60
           ) {{
             repos: edges {{
               repo: node {{
                 ... on Repository {{
                   name
                   stargazerCount
-                  archived
+                  isArchived
                   releases(last: 1) {{
                     edges {{
                       node {{
@@ -217,25 +162,31 @@ def add_gh_metadata(step):
         try:
             response = requests.post(GITHUB_GRAPHQL_API, json={"query": query}, headers=headers)
             data = response.json()
+            if 'errors' in data:
+                for error in data['errors']:
+                    errors.append(error['message'])
+                sys.exit(1)
         except Exception as e:
             errors.append(str(e))
 
         for edge in data["data"]["search"]["repos"]:
             repo = edge["repo"]
             software = github_projects[projectindex]
-            software["stargazer_count"] = repo["stargazerCount"]
-            software["archived"] = repo["archived"]
+            software["stargazers_count"] = repo["stargazerCount"]
+            software["archived"] = repo["isArchived"]
             if repo["releases"]["edges"]:
                 software["current_release"] = {
                     "tag": repo["releases"]["edges"][0]["node"]["tagName"],
-                    "published_at": repo["releases"]["edges"][0]["node"]["publishedAt"]
+                    "published_at": datetime.strptime(repo["releases"]["edges"][0]["node"]["publishedAt"], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d')
                 }
             else:
                 software["current_release"] = {
                     "tag": None,
                     "published_at": None
                 }
-            software["last_commit_date"] = repo["defaultBranchRef"]["target"]["committedDate"]
+            software["updated_at"] = datetime.strptime(repo["defaultBranchRef"]["target"]["committedDate"], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d')
+            if 'commit_history' not in software:
+                software['commit_history'] = {}
             if year_month in software["commit_history"]:
                 software["commit_history"][year_month] = repo["defaultBranchRef"]["target"]["history"]["totalCount"]
             else:
@@ -265,4 +216,3 @@ def gh_metadata_cleanup(step):
                     del software['commit_history'][key]
                     logging.debug('removing commit history %s for %s', key, software['name'])
         write_software_yaml(step, software)
-    
