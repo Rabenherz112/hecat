@@ -72,6 +72,7 @@ import os
 import sys
 import logging
 from datetime import datetime, timedelta
+import json
 import urllib
 import ruamel.yaml
 from jinja2 import Template
@@ -392,3 +393,81 @@ def render_markdown_multipage(step):
     with open(output_css_file_name, 'w+', encoding="utf-8") as outfile:
         logging.info('writing output CSS file %s', output_css_file_name)
         outfile.write(MARKDOWN_CSS)
+    try:
+        build_lunr_index_from_yaml(step)
+    except Exception as e:
+        logging.error('Failed to build Lunr index from YAML: %s', e)
+    static_dir = os.path.join(step['module_options']['output_directory'], '_static')
+    lunr_js_dest = os.path.join(static_dir, 'lunr.js')
+    if not os.path.exists(lunr_js_dest):
+        logging.error('lunr.js not found in _static directory')
+
+def build_lunr_index_from_yaml(step):
+    """
+    Build a Lunr.js-compatible index JSON from source YAML data
+    """
+    src_dir = step['module_options']['source_directory']
+    static_dir = os.path.join(step['module_options']['output_directory'], '_static')
+    os.makedirs(static_dir, exist_ok=True)
+
+    index_entries = []
+    # Software entries
+    software_dir = os.path.join(src_dir, 'software')
+    for filepath in glob.glob(os.path.join(software_dir, '*.yml')):
+        fname = os.path.basename(filepath)
+        file_id = os.path.splitext(fname)[0]
+        with open(filepath, 'r', encoding='utf-8') as f:
+            software = yaml.load(f)
+        slug = to_kebab_case(software.get('name'))
+        entry = {
+            'type': 'software',
+            'id': file_id,
+            'title': software.get('name'),
+            'url': '/index.html#' + slug,
+            'description': software.get('description', ''),
+            'tags': software.get('tags', []),
+            'platforms': software.get('platforms', []),
+            'licenses': software.get('licenses', []),
+            'content': ' '.join([
+                software.get('name', ''),
+                software.get('description', ''),
+                ' '.join(software.get('tags', [])),
+                ' '.join(software.get('platforms', []))
+            ])
+        }
+        index_entries.append(entry)
+
+    # Tag entries
+    tags = load_yaml_data(os.path.join(src_dir, 'tags'))
+    for tag in tags:
+        slug = to_kebab_case(tag.get('name'))
+        entry = {
+            'type': 'tag',
+            'id': slug,
+            'title': tag.get('name'),
+            'url': '/tags/' + slug + '.html',
+            'description': tag.get('description', ''),
+            'related': tag.get('related_tags', []),
+            'content': ' '.join([tag.get('name', ''), tag.get('description', ''), ' '.join(tag.get('related_tags', []))])
+        }
+        index_entries.append(entry)
+
+    # Platform entries
+    platforms = load_yaml_data(os.path.join(src_dir, 'platforms'))
+    for platform in platforms:
+        slug = to_kebab_case(platform.get('name'))
+        entry = {
+            'type': 'platform',
+            'id': slug,
+            'title': platform.get('name'),
+            'url': '/platforms/' + slug + '.html',
+            'description': platform.get('description', ''),
+            'content': ' '.join([platform.get('name', ''), platform.get('description', '')])
+        }
+        index_entries.append(entry)
+
+    # Write JSON index
+    idx_file = os.path.join(static_dir, 'lunr_index.json')
+    with open(idx_file, 'w+', encoding='utf-8') as jf:
+        json.dump(index_entries, jf, ensure_ascii=False, indent=2)
+    logging.info('Wrote Lunr index with %d entries to %s', len(index_entries), idx_file)
