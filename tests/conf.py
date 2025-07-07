@@ -20,6 +20,7 @@ source_suffix = ['.md']
 templates_path = ['_templates']
 exclude_patterns = []
 html_static_path = ['awesome-selfhosted-data/_static']
+html_js_files = [ 'lunr.js', 'lunr-search.js' ]
 html_css_files = ['custom.css']
 
 # myst-parser configuration (https://myst-parser.readthedocs.io/en/latest/configuration.html)
@@ -48,3 +49,7 @@ html_theme_options = {
         },
     ]
 }
+
+# html search configuration
+html_search_language = None
+html_search_options = {}
