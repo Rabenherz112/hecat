@@ -136,6 +136,21 @@ def check_tag_has_at_least_items(tag, software_list, tags_with_redirect, errors,
             message = "{} items tagged {}, each tag must have at least {} items attached".format(tag_items_count, tag['name'], min_items)
             log_exception(message, errors)
 
+def check_related_tags_bidirectional(tags_list, errors):
+    """check that if tag A lists tag B in related_tags, tag B also lists tag A"""
+    logging.info('Checking consistency of related_tags')
+    for tag in tags_list:
+        if 'related_tags' not in tag:
+            continue
+        for related_tag_name in tag['related_tags']:
+            related_tag = next((t for t in tags_list if t['name'] == related_tag_name), None)
+            if related_tag is None:
+                continue
+            if 'related_tags' not in related_tag:
+                message = "{}: related tag {} does not list {} in its related_tags".format(tag['name'], related_tag_name, tag['name'])
+                log_exception(message, errors, severity=logging.error)
+
+
 def check_redirect_sections_empty(step, software, tags_with_redirect, errors):
     """check that any tag in the tags list does not match a tag with redirect set"""
     for tag in software['tags']:
@@ -202,6 +217,16 @@ def check_filename_is_kebab_case_software_name(filename, single_yaml_data, error
         message = '{}: file should be named {}'.format(filename, to_kebab_case(single_yaml_data['name'] + '.yml'))
         log_exception(message, errors, severity=logging.error)
 
+
+def check_icon_has_matching_software(icon, expected_icon_stems, errors):
+    """check that the .webp icon file has a matching software YAML file"""
+    stem, extension = os.path.splitext(icon)
+    if extension.casefold() != '.webp':
+        return
+    if stem not in expected_icon_stems:
+        message = '{}: is a dangling icon file, it has no matching software YAML'.format(icon)
+        log_exception(message, errors, severity=logging.error)
+
 def awesome_lint(step):
     """check all software entries against formatting guidelines"""
     logging.info('checking software entries/tags against formatting guidelines.')
@@ -232,6 +257,7 @@ def awesome_lint(step):
         check_attribute_in_list(tag, 'related_tags', 'name', tags_list, errors)
         check_required_fields(tag, errors, required_fields=TAGS_REQUIRED_FIELDS, severity=logging.warning)
         check_tag_has_at_least_items(tag, software_list, tags_with_redirect, errors, min_items=3)
+    check_related_tags_bidirectional(tags_list, errors)
     for platform in platforms_list:
         check_required_fields(platform, errors, required_fields=step['module_options']['platforms_required_fields'])
     for software in software_list:
@@ -247,10 +273,20 @@ def awesome_lint(step):
         check_boolean_attributes(software, errors)
     for license in licenses_list:
         check_required_fields(license, errors, required_fields=LICENSES_REQUIRED_FIELDS)
+    expected_icon_stems = set()
     for (root, dirs, files) in os.walk(step['module_options']['source_directory'] + '/software'):
         for filename in files:
             single_yaml_data = load_yaml_data(os.path.join(root, filename))
             check_filename_is_kebab_case_software_name(filename, single_yaml_data, errors)
+            if filename.endswith('.yml'):
+                expected_icon_stems.add(os.path.splitext(filename)[0])
+    icons_directory = os.path.join(step['module_options']['source_directory'], 'icons')
+    if not os.path.isdir(icons_directory):
+        logging.debug('icon directory %s does not exist, skipping dangling icon check', icons_directory)
+    else:
+        icon_list = sorted(os.listdir(icons_directory))
+        for icon in icon_list:
+            check_icon_has_matching_software(icon, expected_icon_stems, errors)
     if errors:
         logging.error("There were errors during processing")
         sys.exit(1)
