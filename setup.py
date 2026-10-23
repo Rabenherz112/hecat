@@ -27,7 +27,7 @@ setup(
         'ruamel.yaml==0.17.21',
         'python-dateutil',
         'requests',
-        'yt_dlp==2026.8.19',
+        'yt_dlp==2026.10.21',
         'Pillow==11.1.0',
         'jinja2',
         'Markdown',
